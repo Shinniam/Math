@@ -1,0 +1,185 @@
+import cv2
+import numpy as np
+import os
+import pytesseract
+from PIL import Image
+import sympy as sp
+import tensorflow as tf
+from tensorflow.keras import layers, models
+
+# --------------------------
+# ① 設定・定数
+# --------------------------
+# 学習対象の文字（最後は√ は Unicode U+221A）
+CHARACTERS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+              'x', 'y', 'z', 'a', 'b', 'c', 'd', 'e', 'i', '\u221a']
+SAVE_DIR = 'handwriting_data'  # 画像の保存先フォルダ
+IMG_SIZE = 64                 # モデル学習用の画像サイズ
+SAMPLES_PER_CHAR = 10         # 各文字を収集する回数
+
+# --------------------------
+# ② 手書きデータ収集（GUI）
+# --------------------------
+def collect_handwriting_data():
+    """各文字をSAMPLES_PER_CHAR回撮影して保存する"""
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR)
+    
+    for char in CHARACTERS:
+        char_dir = os.path.join(SAVE_DIR, char)
+        if not os.path.exists(char_dir):
+            os.makedirs(char_dir)
+        
+        print(f"文字「{char}」を {SAMPLES_PER_CHAR} 回書いて、カメラに向かってください。")
+        cap = cv2.VideoCapture(0)
+        count = 0
+        while count < SAMPLES_PER_CHAR:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            
+            # 画面に文字と回数を表示
+            cv2.putText(frame, f"Write: {char} ({count+1}/{SAMPLES_PER_CHAR})",
+                        (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.imshow("Handwriting Capture", frame)
+            key = cv2.waitKey(1)
+            
+            # キー's'を押すと現在のフレームを保存
+            if key == ord('s'):
+                img_path = os.path.join(char_dir, f"{count}.png")
+                cv2.imwrite(img_path, frame)
+                print(f"Saved: {img_path}")
+                count += 1
+            elif key == ord('q'):
+                print("中断します。")
+                break
+        
+        cap.release()
+        cv2.destroyAllWindows()
+    print("全ての文字のデータ収集が完了しました！")
+
+# --------------------------
+# ③ 手書き認識モデルの構築・学習
+# --------------------------
+def build_model():
+    """CNNモデルの構築"""
+    model = models.Sequential([
+        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(IMG_SIZE, IMG_SIZE, 1)),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(128, activation='relu'),
+        layers.Dense(len(CHARACTERS), activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+def load_handwriting_data():
+    """保存した手書き画像データを読み込み、前処理して返す"""
+    images, labels = [], []
+    for idx, char in enumerate(CHARACTERS):
+        char_dir = os.path.join(SAVE_DIR, char)
+        if not os.path.exists(char_dir):
+            continue
+        for img_name in os.listdir(char_dir):
+            img_path = os.path.join(char_dir, img_name)
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            img = cv2.resize(img, (IMG_SIZE, IMG_SIZE))
+            img = img.astype("float32") / 255.0
+            images.append(img.reshape(IMG_SIZE, IMG_SIZE, 1))
+            labels.append(idx)
+    images = np.array(images)
+    labels = np.array(labels)
+    return images, labels
+
+def train_handwriting_model():
+    """学習データから手書き認識モデルを学習させ、保存する"""
+    images, labels = load_handwriting_data()
+    if len(images) == 0:
+        print("データが見つかりません。まずデータ収集を行ってください。")
+        return
+    model = build_model()
+    model.fit(images, labels, epochs=10, validation_split=0.2)
+    model.save('handwriting_model.h5')
+    print("手書き認識モデルの学習が完了しました！（handwriting_model.h5）")
+    return model
+
+# --------------------------
+# ④ 数学の問題をOCRで解く
+# --------------------------
+def extract_text_from_image(image_path, lang='jpn'):
+    """
+    画像からOCRでテキスト抽出
+    ※ 数学の問題が日本語の場合は lang='jpn' を指定
+    """
+    img = Image.open(image_path)
+    text = pytesseract.image_to_string(img, lang=lang)
+    return text
+
+def solve_equation(equation_str):
+    """
+    簡単な一変数方程式を解く
+    例: 'x**2 - 4 = 0' のような文字列から解を求める
+    """
+    try:
+        lhs, rhs = equation_str.split('=')
+        x = sp.symbols('x')
+        eq = sp.Eq(sp.sympify(lhs), sp.sympify(rhs))
+        solutions = sp.solve(eq, x)
+        return solutions
+    except Exception as e:
+        print("方程式のパースまたは解法に失敗しました:", e)
+        return None
+
+def extract_and_solve(image_path):
+    """
+    画像から数学の問題をOCRで読み取り、解を求める
+    ※ シンプルに '=' を含む行を対象とする例
+    """
+    text = extract_text_from_image(image_path)
+    print("OCRで抽出されたテキスト:")
+    print(text)
+    
+    # 各行から '=' を含む行を探す
+    for line in text.splitlines():
+        if '=' in line:
+            print(f"検出された数式: {line}")
+            sol = solve_equation(line)
+            if sol is not None:
+                print("解:", sol)
+            else:
+                print("解けませんでした。")
+            # 1つ見つけたら終了（必要に応じて複数行対応可） 
+            return
+    print("数式が見つかりませんでした。")
+
+# --------------------------
+# ⑤ メイン処理（メニュー形式）
+# --------------------------
+def main():
+    while True:
+        print("\n=== メニュー ===")
+        print("1. 手書きデータを収集（各文字10回ずつ）")
+        print("2. 手書き認識モデルを学習")
+        print("3. 数学の問題画像からOCRで問題を解く")
+        print("q. 終了")
+        choice = input("選択してください: ").strip()
+        
+        if choice == '1':
+            collect_handwriting_data()
+        elif choice == '2':
+            train_handwriting_model()
+        elif choice == '3':
+            image_path = input("数学の問題が写った画像ファイルのパスを入力してください: ").strip()
+            extract_and_solve(image_path)
+        elif choice.lower() == 'q':
+            print("終了します。")
+            break
+        else:
+            print("無効な選択です。もう一度入力してください。")
+
+if __name__ == '__main__':
+    main()
